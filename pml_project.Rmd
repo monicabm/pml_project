@@ -1,0 +1,160 @@
+---
+title: "Practical Machine Learning Prediction Assignment"
+output: html_document
+---
+
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. The goal pf this project will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har.
+
+
+### Library and Initial Set Up
+
+Load required libraries
+
+```{r}
+#load libraries
+library(tree)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+require(randomForest)
+```
+
+Set seed to ensure results are reproducible.
+
+```{r}
+set.seed(12345)
+```
+
+##Data 
+
+The training data for this project are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data was downloaded in the working directory.
+
+```{r}
+#read train and test data
+TrainFile <- "pml-training.csv"
+training <- read.csv(TrainFile, na.strings = c("NA","#DIV/0!",""))
+TestFile <- "pml-testing.csv"
+testing <- read.csv(TestFile, na.strings = c("NA","#DIV/0!",""))
+```
+
+###Training Data Partioning and Cleanup
+
+We will partition the training data into a smaller training and testing set (60/40). After which we will proceed with some cleanup.
+
+```{r}
+inTrain <- createDataPartition(y=training$classe, p=0.6, list=FALSE)
+myTraining <- training[inTrain, ]
+myTesting <- training[-inTrain, ]
+dim(myTraining); dim(myTesting)
+```
+
+Our data includes NA variables, variables that might not be relevant or related to the dependent variable, variables that have near zero variance, and variables that are highly correlated.  We will remove these before creating our models.
+
+```{r}
+#remove NA variables
+myTraining.deNA <- myTraining[ , colSums(is.na(myTraining)) == 0]
+myTesting.deNA <- myTesting[ , colSums(is.na(myTesting)) == 0]
+dim(myTraining.deNA); dim(myTesting.deNA)
+#remove unlelevant variables
+remove = c('X','user_name','raw_timestamp_part_1','raw_timestamp_part_2','cvtd_timestamp','new_window','num_window')
+myTraining.deRel <- myTraining.deNA[,-which(names(myTraining.deNA) %in% remove)]
+myTesting.deRel <- myTesting.deNA[,-which(names(myTesting.deNA) %in% remove)]
+dim(myTraining.deRel); dim(myTesting.deRel)
+#remove variales with very low variance
+zeroVar_train = nearZeroVar(myTraining.deRel[sapply(myTraining.deRel, is.numeric)],saveMetrics = TRUE)
+myTraining.nonZeroVar <- myTraining.deRel[,zeroVar_train[,'nzv']==0]
+zeroVar_test = nearZeroVar(myTesting.deRel[sapply(myTesting.deRel, is.numeric)],saveMetrics = TRUE)
+myTesting.nonZeroVar <- myTesting.deRel[,zeroVar_test[,'nzv']==0]
+dim(myTraining.nonZeroVar); dim(myTesting.nonZeroVar)
+#remove highly correlated variables
+corMat <- cor(na.omit(myTraining.nonZeroVar[sapply(myTraining.nonZeroVar,is.numeric)]))
+dim(corMat)
+removeCor_idx <- findCorrelation(corMat,cutoff = .90, verbose=TRUE)
+myTraining.deCor <- myTraining.nonZeroVar[,-removeCor_idx]
+myTesting.deCor <- myTesting.nonZeroVar[,-removeCor_idx]
+dim(myTraining.deCor); dim(myTesting.deCor)
+```
+
+##Analysis
+
+###Regression Tree Analysis
+
+```{r}
+tree.training = tree(classe~.,data=myTraining.deCor)
+summary(tree.training)
+plot(tree.training)
+text(tree.training,cex=0.6)
+```
+
+The resulting tree is rather messy.  It may need some pruning. Another idea is to try recursive partitioning and regression tree (rpart).  
+
+###RPART Analysis
+
+```{r}
+modelFit_rpart <- train(classe ~., method = 'rpart',data=myTraining.deCor) 
+print(modelFit_rpart$finalModel)
+fancyRpartPlot(modelFit_rpart$finalModel)
+```
+
+This tree is more managable for interpretation.  We can test to see if the regression tree and rpart are equivalant.
+
+```{r}
+tree.pred = predict(tree.training,myTesting.deCor,type="class")
+predMatrix = with(myTesting.deCor, table(tree.pred,classe))
+#find error rate
+sum(diag(predMatrix))/sum(as.vector(predMatrix))
+
+tree.pred = predict(modelFit_rpart,myTesting.deCor)
+predMatrix = with(myTesting.deCor, table(tree.pred,classe))
+#find error rate
+sum(diag(predMatrix))/sum(as.vector(predMatrix))
+```
+
+It looks like the regression tree approach performs a bit better.  With that said, the tree was messy and the actual results are not very accurate.  Nevertheless, we can see if pruning the tree will help with interpretation and get us a stellar performance. We will use cross validation to prune the regression tree.
+
+```{r}
+cv.training=cv.tree(tree.training,FUN=prune.misclass)
+cv.training
+plot(cv.training)
+```
+
+Our crossvalidation analysis shows that we could prune the tree at node 20. Lets see if pruning will improve our performance.
+
+```{r}
+prune.training=prune.misclass(tree.training,best=20)
+tree.pred = predict(prune.training,myTesting.deCor,type="class")
+predMatrix = with(myTesting.deCor, table(tree.pred,classe))
+#find error rate
+sum(diag(predMatrix))/sum(as.vector(predMatrix))
+```
+
+Still our accuracy is not great. But the tree is shallower making easier to interpret. Becuase our accuracy has not imporved much.  We will try Random Forest next.
+
+###Random Forest Analysis
+
+```{r}
+RF.training = randomForest(classe~.,data=myTraining.deCor,ntree=100,importance=TRUE)
+RF.training
+varImpPlot((RF.training))
+
+tree.pred = predict(RF.training,myTesting.deCor)
+predMatrix = with(myTesting.deCor, table(tree.pred,classe))
+#find error rate
+sum(diag(predMatrix))/sum(as.vector(predMatrix))
+```
+
+We can see that OOB estimate of error rate is 89% for the training data.  We can also see which variables have more influence on our prediction.  In the end testing out model on our test data resulted in excellent accuracy (99.3%). As a result, we will use this model to test the original test data.
