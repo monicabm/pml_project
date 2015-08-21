@@ -1,2 +1,2 @@
-# pml_project
+# practical machine learning project
 pml project files
